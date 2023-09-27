@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/EnumerableSet.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "./SushiToken.sol";
+import "./BaldxToken.sol";
 
 interface IMigratorChef {
     // Perform LP token migration from legacy UniswapV2 to SushiSwap.
@@ -54,9 +54,10 @@ contract MasterChef is Ownable {
         uint256 allocPoint; // How many allocation points assigned to this pool. SUSHIs to distribute per block.
         uint256 lastRewardBlock; // Last block number that SUSHIs distribution occurs.
         uint256 accSushiPerShare; // Accumulated SUSHIs per share, times 1e12. See below.
+        uint16 depositFeeBP; // Deposit fee in basis points
     }
     // The SUSHI TOKEN!
-    SushiToken public sushi;
+    BaldxToken public sushi;
     // Dev address.
     address public devaddr;
     // Block number when bonus SUSHI period ends.
@@ -64,7 +65,11 @@ contract MasterChef is Ownable {
     // SUSHI tokens created per block.
     uint256 public sushiPerBlock;
     // Bonus muliplier for early sushi makers.
-    uint256 public constant BONUS_MULTIPLIER = 10;
+    uint256 public constant BONUS_MULTIPLIER = 1;
+    // Deposit Fee address
+    address public feeAddress;
+    // @notice Maximum deposit fee rate: 2%
+    uint16 public constant MAXIMUM_DEPOSIT_FEE_RATE = 200;
     // The migrator contract. It has a lot of power. Can only be set through governance (owner).
     IMigratorChef public migrator;
     // Info of each pool.
@@ -82,16 +87,21 @@ contract MasterChef is Ownable {
         uint256 indexed pid,
         uint256 amount
     );
+    event SetFeeAddress(address indexed user, address indexed newAddress);
+    event SetDevAddress(address indexed user, address indexed newAddress);
+    event UpdateEmissionRate(address indexed user, uint256 sushiPerBlock);
 
     constructor(
-        SushiToken _sushi,
+        BaldxToken _sushi,
         address _devaddr,
+        address _feeAddress,
         uint256 _sushiPerBlock,
         uint256 _startBlock,
         uint256 _bonusEndBlock
     ) public {
         sushi = _sushi;
         devaddr = _devaddr;
+        feeAddress = _feeAddress;
         sushiPerBlock = _sushiPerBlock;
         bonusEndBlock = _bonusEndBlock;
         startBlock = _startBlock;
@@ -106,8 +116,10 @@ contract MasterChef is Ownable {
     function add(
         uint256 _allocPoint,
         IERC20 _lpToken,
+        uint16 _depositFeeBP,
         bool _withUpdate
     ) public onlyOwner {
+        require(_depositFeeBP <= MAXIMUM_DEPOSIT_FEE_RATE, "add: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
         }
@@ -119,7 +131,8 @@ contract MasterChef is Ownable {
                 lpToken: _lpToken,
                 allocPoint: _allocPoint,
                 lastRewardBlock: lastRewardBlock,
-                accSushiPerShare: 0
+                accSushiPerShare: 0,
+                depositFeeBP : _depositFeeBP
             })
         );
     }
@@ -128,8 +141,10 @@ contract MasterChef is Ownable {
     function set(
         uint256 _pid,
         uint256 _allocPoint,
+        uint16 _depositFeeBP,
         bool _withUpdate
     ) public onlyOwner {
+        require(_depositFeeBP <= MAXIMUM_DEPOSIT_FEE_RATE, "set: deposit fee too high");
         if (_withUpdate) {
             massUpdatePools();
         }
@@ -137,6 +152,7 @@ contract MasterChef is Ownable {
             _allocPoint
         );
         poolInfo[_pid].allocPoint = _allocPoint;
+        poolInfo[_pid].depositFeeBP = _depositFeeBP;
     }
 
     // Set the migrator contract. Can only be called by the owner.
@@ -222,7 +238,7 @@ contract MasterChef is Ownable {
             multiplier.mul(sushiPerBlock).mul(pool.allocPoint).div(
                 totalAllocPoint
             );
-        sushi.mint(devaddr, sushiReward.div(10));
+        // sushi.mint(devaddr, sushiReward.div(10));
         sushi.mint(address(this), sushiReward);
         pool.accSushiPerShare = pool.accSushiPerShare.add(
             sushiReward.mul(1e12).div(lpSupply)
@@ -242,12 +258,16 @@ contract MasterChef is Ownable {
                 );
             safeSushiTransfer(msg.sender, pending);
         }
-        pool.lpToken.safeTransferFrom(
-            address(msg.sender),
-            address(this),
-            _amount
-        );
-        user.amount = user.amount.add(_amount);
+        if (_amount > 0) {
+            pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+            if (pool.depositFeeBP > 0) {
+                uint256 depositFee = _amount.mul(pool.depositFeeBP).div(10000);
+                pool.lpToken.safeTransfer(feeAddress, depositFee);
+                user.amount = user.amount.add(_amount).sub(depositFee);
+            } else {
+                user.amount = user.amount.add(_amount);
+            }
+        }
         user.rewardDebt = user.amount.mul(pool.accSushiPerShare).div(1e12);
         emit Deposit(msg.sender, _pid, _amount);
     }
@@ -293,5 +313,18 @@ contract MasterChef is Ownable {
     function dev(address _devaddr) public {
         require(msg.sender == devaddr, "dev: wut?");
         devaddr = _devaddr;
+        emit SetDevAddress(msg.sender, _devaddr);
+    }
+
+    function setFeeAddress(address _feeAddress) public {
+        require(msg.sender == feeAddress, "setFeeAddress: FORBIDDEN");
+        feeAddress = _feeAddress;
+        emit SetFeeAddress(msg.sender, _feeAddress);
+    }
+
+    function updateEmissionRate(uint256 _sushiPerBlock) public onlyOwner {
+        massUpdatePools();
+        sushiPerBlock = _sushiPerBlock;
+        emit UpdateEmissionRate(msg.sender, _sushiPerBlock);
     }
 }
