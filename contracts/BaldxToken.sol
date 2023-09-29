@@ -7,10 +7,76 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 // BaldxToken with Governance.
 contract BaldxToken is ERC20("BaldxToken", "BALDX"), Ownable {
-    constructor(uint256 initialMint, address treasury) public {
+    uint256 public immutable startVestTime;
+    uint256 public immutable endVestTime;
+
+    uint256 public constant VESTING_TREASURY_AMOUNT = 500000 * 1e18;
+    uint256 public constant VESTING_TEAM_AMOUNT = 500000 * 1e18;
+
+    address public treasury;
+    address public team;
+
+    uint256 public claimedTreasury = 0;
+    uint256 public claimedTeam = 0;
+
+    constructor(uint256 initialMint, address _treasury, address _team, uint256 _startVestTime, uint256 _endVestTime) public {
+        require(_endVestTime > _startVestTime, "invalid vest time");
+        require(_treasury != address(0), "!Treasury");
+        require(_team != address(0), "!Team");
+
+        startVestTime = _startVestTime;
+        endVestTime = _endVestTime;
+        treasury = _treasury;
+        team = _team;
+
         if (initialMint > 0) {
-            require(treasury != address(0), "!Treasury");
-            _mint(treasury, initialMint);
+            _mint(_treasury, initialMint);
+        }
+    }
+
+    function setTreasury(address _treasury) public {
+        require(msg.sender == treasury, "not authorized");
+        treasury = _treasury;
+    }
+
+    function setTeam(address _team) public {
+        require(msg.sender == team, "not authorized");
+        team = _team;
+    }
+
+    function claimVestedTreasury() public {
+        require(msg.sender == treasury, "wrong claimer");
+        uint256 vested = vestedTreasury();
+        uint256 claimable = vested - claimedTreasury;
+        require(claimable > 0, "no more to claim");
+        _mint(treasury, claimable);
+        claimedTreasury = vested;
+    }
+
+    function claimVestedTeam() public {
+        require(msg.sender == team, "wrong claimer");
+        uint256 vested = vestedTeam();
+        uint256 claimable = vested - claimedTeam;
+        require(claimable > 0, "no more to claim");
+        _mint(team, claimable);
+        claimedTeam = vested;
+    }
+
+    function vestedTreasury() public view returns (uint256) {
+        return _vested(VESTING_TREASURY_AMOUNT, block.timestamp, startVestTime, endVestTime);
+    }
+
+    function vestedTeam() public view returns (uint256) {
+        return _vested(VESTING_TEAM_AMOUNT, block.timestamp, startVestTime, endVestTime);
+    }
+
+    function _vested(uint256 totalAllocation, uint256 timestamp, uint256 start, uint256 end) internal pure returns (uint256) {
+        if (timestamp < start) {
+            return 0;
+        } else if (timestamp >= end) {
+            return totalAllocation;
+        } else {
+            return (totalAllocation * (timestamp - start)) / (end - start);
         }
     }
 
